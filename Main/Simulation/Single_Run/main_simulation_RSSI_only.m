@@ -3,32 +3,32 @@ clear; close all;
 addpath(genpath(pwd));
 
 %% Global configuration
-Total_time = 1000;                      % maximun simulation time
-uav0 = [993, 504, 50, pi/4]';          % uav initial location 
+Total_time = 10000;                      % maximun simulation time
+uav0 = [1, 1, 80, pi/4]';                % uav initial location 
 Use_Void = true;
-rotation_time = 20;
+rotation_time = 10;
+pd = 0.9;
 
 plot_result = true;
-plot_interval = 1;
+plot_interval = 5;
 reward = Reward_Type.Renyi;
-planning_rssi_var = 4;                  % rssi noise variance used in planning
+scenario = 'Scenario1.mat'; % flat
+% scenario = 'Scenario11_Kangaroo_alt.mat'; % hilly
+% scenario = 'Scenario2_boorowa.mat'; % mountain
 
 %% Useful intermedia variable
 uav = nan(4, Total_time);
 selected_action = [];               % planner output
 selected_target = nan;              % planner selected target
 action_index = 0;                   % the nth action
-all_target_found = false;           % true if all targets are found 
+all_target_found = false;               % true if all targets are found 
 
 %% Initialization
 
 
 % generate module settings
-ntarget = 4;
-config = simulation_config_wrapper(ntarget, reward, Use_Void, rotation_time);
-target_id_list = config.target_id_list;
-
-term_val = nan(ntarget, Total_time);
+ntarget = 20;
+config = simulation_config_wrapper(ntarget, reward, Use_Void, rotation_time, pd, scenario);
 
 % initialize each modules
 % =========== [System modules] ===============
@@ -39,8 +39,6 @@ UAV_Action = UAV_Actions(config.uav_config, config.area_config);
 Terminate = Termination_Condition(config.Term_config);
 RSSI_Filter = Bernoulli_Filter(config.RSSI_filter_config, RSSI_model, target_model);
 Planner = Planner_greedy_POMDP(config.planner_config, RSSI_model, target_model, UAV_Action);
-%% Change planning rssi noise variance
-Planner.Meas_Model.config.Sigma_RSSI = planning_rssi_var;
 
 % =========== [Simulation modules] ============
 target_truth_generator = Target_State_Generator(config.sim_target_config, target_model);
@@ -50,30 +48,27 @@ RSSI_generator = RSSI_Generator(config.sim_sensor_config, config.sim_target_radi
 recorder = Statistics(ntarget, (1:ntarget)', Total_time, config, 'Simulation', false);
 
 
+
+
 %% Simulation preparation 
 % initialize uav height
 uav0(3) = uav0(3)+config.area_config.DEM.DATA(round(uav0(1)), round(uav0(2)));
 
 % generate target truth
-% truth = target_truth_generator.gen_target_state(Total_time, config.area_config.DEM.DATA);
-truth = nan(3, ntarget, Total_time);
-for n = 1:ntarget
-    for t = 1:Total_time
-       truth(1:2, n, t) = config.sim_target_config.Init_State(1:2, n);
-       truth(3, n, t) = config.area_config.DEM.DATA(round(truth(1, n, 1)), round(truth(2,n,1))) + 0.5;
-    end
-end
-% save truth
-recorder.stats.truth = truth;
+truth = target_truth_generator.load_truth(scenario);
+truth = truth.truth(:, 1:ntarget, :);
+% save truth 
+recorder.record_truth(truth);
 
 % initialize filter density
 density = cell(config.target_config.Ntarget, 1);
 for i = 1:config.target_config.Ntarget
-    density{i} = Bernoulli(gen_birth_particles_polygon(config.area_config.DEM.DATA, 10000, config.area_config.area, config.area_config.Alt_range), 0.01, config.target_id_list(i));
+    density{i} = Bernoulli(gen_birth_particles_uniform(config.area_config.DEM.DATA, 10000), 0.01, i);
 end
 
 % generate initial action
-selected_action.waypoints = [];
+selected_action.waypoints = UAV_Action.get_action_md(uav0, pi/4, config.uav_config.vmax);
+selected_action.type = Action_Type.RSSI;
 
 
 %% Plotting setting
@@ -91,9 +86,11 @@ if plot_result
 end
 
 
+
 %% ======================== Main Loop ================================
 planning_cycle = 0;
 t = 0;
+term_val = nan(ntarget, Total_time);
 while t <= Total_time && ~all_target_found
     t = t+1;    % increment simulation time
     n_cycle = ceil(t/config.planner_config.T);  % current planning cycle
@@ -117,7 +114,7 @@ while t <= Total_time && ~all_target_found
             if ~isempty(idx)
                 density{n} = RSSI_Filter.filtering(density{n}, [config.target_id_list(n), z.RSSI(idx)], uav(:,t));
             else
-                % predicting
+                density{n} = RSSI_Filter.predict(density{n});
             end
         end
     end
@@ -143,12 +140,11 @@ while t <= Total_time && ~all_target_found
     
     % ====================== update plot =========================
     if plot_result && mod(t, plot_interval) == 0
-        plot_tool.update_plot(density, uav(:, 1:t), truth, est, selected_target);
+        plot_tool.update_plot(density, uav(:, 1:t), truth(:, :, 1:t), est, selected_target);
         plot_tool.update_error_plot(recorder.stats.error_history, t);
         plot_tool.update_termination_value(term_val(:, 1:t));
     end
 end
-
 % Save UAV Path
 recorder.record_uav_path(uav);
 

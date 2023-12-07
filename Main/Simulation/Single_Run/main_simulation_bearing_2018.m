@@ -4,14 +4,18 @@ addpath(genpath(pwd));
 
 %% Global configuration
 Total_time = 15000;                      % maximun simulation time
-uav0 = [993, 504, 50, pi/4]';               % uav initial location 
+uav0 = [1, 1, 80, pi/4]';               % uav initial location 
 all_target_found = false;               % true if all targets are found 
-reward = Reward_Type.Shannon;
-Use_Void = false;
+reward = Reward_Type.Renyi;
+Use_Void = true;
 rotation_time = 45;
+pd = 0.9;
 
 plot_result = true;
 plot_interval = 20;
+scenario = 'Scenario1.mat'; % flat
+% scenario = 'Scenario11_Kangaroo_alt.mat'; % hilly
+% scenario = 'Scenario2_boorowa.mat'; % mountain
 
 %% Useful intermedia variable
 uav = nan(4, Total_time);
@@ -20,17 +24,10 @@ action_index = 0;                   % the nth action
 
 
 %% Initialization
-
-
 % generate module settings
-ntarget = 4;
-config = simulation_config_wrapper(ntarget, reward, Use_Void, rotation_time);
-
-% update RSSI model 
+ntarget = 3;
+config = simulation_config_wrapper_2018(ntarget, reward, Use_Void, rotation_time, pd, scenario);
 config.RSSI_sensor_config.Antenna = Antenna_Type.Isotropic;
-config.RSSI_sensor_config.Likelihood_Type = Likelihood_Type.precise;
-config.RSSI_sensor_config.Sigma_RSSI = 12;   % increased nosie to handle non-precise model
-
 % initialize each modules
 % =========== [System modules] ===============
 target_model = Target_Model(config.target_config);
@@ -53,23 +50,17 @@ RSSI_generator = RSSI_Generator(config.sim_sensor_config, config.sim_target_radi
 recorder = Statistics(ntarget, (1:ntarget)', Total_time, config, 'Simulation', false);
 
 
+
 %% Simulation preparation 
 % initialize uav height
 uav0(3) = uav0(3)+config.area_config.DEM.DATA(round(uav0(1)), round(uav0(2)));
 
 
 % generate target truth
-% truth = target_truth_generator.gen_target_state(Total_time, config.area_config.DEM.DATA);
-truth = nan(3, ntarget, Total_time);
-for n = 1:ntarget
-    for t = 1:Total_time
-       truth(1:2, n, t) = config.sim_target_config.Init_State(1:2, n);
-       truth(3, n, t) = config.area_config.DEM.DATA(round(truth(1, n, 1)), round(truth(2,n,1))) + 0.5;
-    end
-end
-% save truth
-recorder.stats.truth = truth;
-
+truth = target_truth_generator.load_truth(scenario);
+truth = truth.truth(:, 1:ntarget, :);
+% % save truth 
+recorder.record_truth(truth);
 
 % initialize filter density
 density = cell(config.target_config.Ntarget, 1);
@@ -78,13 +69,13 @@ for i = 1:config.target_config.Ntarget
 end
 
 % generate initial action
-selected_action.waypoints = UAV_Action.get_composit_waypoints(uav0, pi/4, 10);
+selected_action.waypoints = UAV_Action.get_composit_waypoints(uav0, pi/4, config.uav_config.vmax);
 selected_action.type = Action_Type.RSSI;
 
 
 %% Plotting setting
 if plot_result
-    plot_tool = Result_plot( ...
+    plot_tool = Result_plot_experiment( ...
         config.target_config.Ntarget,...
         'Plot3D',           false,...
         'Plot_Void',        config.planner_config.Use_Void, ...
@@ -100,6 +91,7 @@ end
 
 %% ======================== Main Loop ================================
 t = 0;
+term_val = nan(ntarget, Total_time);
 while t <= Total_time && ~all_target_found
     t = t+1;    % increment simulation time
     n_cycle = ceil(t/config.planner_config.T);  % current planning cycle
@@ -145,14 +137,14 @@ while t <= Total_time && ~all_target_found
         fprintf('Selected Action Type: %s .\n', selected_action.type);
         
         % init bearing action
-        AoA_Generator.check_start_condition(selected_action, t);
+        AoA_Generator.check_start_condition(selected_action, t + config.uav_config.traject_time - config.uav_config.rotation_time);
         
         % save selected action
         recorder.record_action(uav(:,t), selected_action, action_index, t);
     end
     
     % =============== check termination codition ================
-    [density, all_target_found, found_report] = Terminate.termination_check(density, t);
+    [density, all_target_found, found_report, term_val(:, t)] = Terminate.termination_check(density, t);
     
     % ====================== Collecting data ====================
     [est] = recorder.record(z, density, found_report, t);
@@ -160,7 +152,9 @@ while t <= Total_time && ~all_target_found
     
     % ====================== update plot =========================
     if plot_result && mod(t, plot_interval) == 0
-        plot_tool.update_plot(density, uav(:, 1:t), truth(:, 1:ntarget, 1:t), est, selected_target);
+        plot_tool.update_plot(density, uav(:, 1:t), truth(:, :, 1:t), est, selected_target);
+        plot_tool.update_error_plot(recorder.stats.error_history, t);
+        plot_tool.update_termination_value(term_val(:, 1:t));
     end
 end
 
